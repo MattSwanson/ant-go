@@ -301,6 +301,7 @@ func checkDeviceInUse(desc *gousb.DeviceDesc) bool {
 
 type Driver interface {
 	attach(*BaseSensor, bool) bool
+	appendScanner(*BaseSensor)
 	detach(*BaseSensor) bool
 	canScan() bool
 	Open(*gousb.Context) error
@@ -467,6 +468,7 @@ func (drv *USBDriver) read(data []byte) {
 		drv.write(setNetworkKey())
 	case messageID == MessageChannelEvent && data[4] == MessageNetworkKey:
 		for _, cb := range drv.startupCallbacks {
+			log.Println("--- calling startupCallback ---")
 			cb()
 		}
 	default:
@@ -477,22 +479,32 @@ func (drv *USBDriver) read(data []byte) {
 }
 
 func (drv *USBDriver) attach(sensor *BaseSensor, forScan bool) bool {
+	fmt.Println("-----Attempting to attach sensor-------")
 	if drv.usedChannels < 0 {
+		log.Println("-------- didnt attach usedChannels < 0")
 		return false
 	}
 	if forScan {
 		if drv.usedChannels != 0 {
+			log.Println("-------- didnt attach usedChannels != 0 and forScan")
 			return false
 		}
 		drv.usedChannels = -1
 	} else {
 		if drv.MaxChannels <= drv.usedChannels {
+			log.Println("------- didnt attach MaxChannels less than usedChannels")
 			return false
 		}
 		drv.usedChannels++
 	}
 	drv.attachedSensors = append(drv.attachedSensors, sensor)
+	fmt.Println("Attached new sensor: ", sensor)
+	fmt.Printf("Now %d sensors attached\n", len(drv.attachedSensors))
 	return true
+}
+
+func (drv *USBDriver) appendScanner(sensor *BaseSensor) {
+	drv.attachedSensors = append(drv.attachedSensors, sensor)
 }
 
 func (drv *USBDriver) detach(sensor *BaseSensor) bool {
@@ -588,6 +600,11 @@ type BaseSensor struct {
 	messageQueue	   []Message
 	decodeDataCallback func([]byte)
 	statusCallback     func(byte, byte) bool
+	onAttach		   func()
+}
+
+func (sensor *BaseSensor) SetOnAttachCallback(f func()) {
+	sensor.onAttach = f
 }
 
 type Sensor interface {
@@ -608,11 +625,14 @@ func NewBaseSensor(driver Driver) *BaseSensor {
 }
 
 func (sensor *BaseSensor) scan(channelType string, frequency uint32) error {
+	log.Println("---scannning---")
 	if sensor.channel != nil {
+		log.Println("sensor already attached")
 		return errors.New("sensor already attached")
 	}
 
 	if !sensor.driver.canScan() {
+		log.Println("usb stick cannot scan")
 		return errors.New("usb stick cannot scan")
 	}
 
@@ -659,6 +679,7 @@ func (sensor *BaseSensor) scan(channelType string, frequency uint32) error {
 			return true
 		case MessageChannelOpenRXScan:
 			//TODO emit attached event
+			sensor.onAttach()
 			return true
 		case MessageChannelClose:
 			return true
@@ -678,14 +699,20 @@ func (sensor *BaseSensor) scan(channelType string, frequency uint32) error {
 		sensor.deviceID = 0
 		sensor.transmissionType = 0
 		sensor.statusCallback = onStatus
+		log.Println("attached event")
+		sensor.driver.appendScanner(sensor)
 		//TODO "emit" an attach event
+		sensor.onAttach()
 	} else if sensor.driver.attach(sensor, true) {
 		sensor.channel = &channel
 		sensor.deviceID = 0
 		sensor.transmissionType = 0
 		sensor.statusCallback = onStatus
 		sensor.write(assignChannel(channel, channelType))
+
+		log.Println("attached not isscanning")
 	} else {
+		log.Println("cannot attach sensor")
 		return errors.New("cannot attach sensor")
 	}
 	return nil
@@ -747,6 +774,7 @@ func (sensor *BaseSensor) attach(channel, deviceID, deviceType, timeout, period,
 			return true
 		case MessageChannelOpen:
 			//TODO emit attached event
+			sensor.onAttach()
 			return true
 		case MessageChannelClose:
 			return true
@@ -914,6 +942,7 @@ func (scanner *AntPlusScanner) decodeData(data []byte) {
 	if deviceType != scanner.deviceType() {
 		return
 	}
+	
 
 	scanner.createStateIfNew(deviceID)
 
